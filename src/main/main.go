@@ -2,7 +2,6 @@ package main
 
 import (
 	"archive/zip"
-	"compress/zlib"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,12 +11,14 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"github.com/google/uuid"
-	"github.com/joho/godotenv"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/drive/v3"
+	"google.golang.org/api/option"
 )
 
 // Retrieve a token, saves the token, then returns the generated client.
@@ -76,46 +77,41 @@ func saveToken(path string, token *oauth2.Token) {
 }
 
 func getService() (*drive.Service, error) {
+	ctx := context.Background()
 	b, err := ioutil.ReadFile("credentials.json")
 	if err != nil {
-		fmt.Printf("Unable to read credentials.json file. Err: %v\n", err)
-		return nil, err
+		log.Fatalf("Unable to read client secret file: %v", err)
 	}
 
 	// If modifying these scopes, delete your previously saved token.json.
-	config, err := google.ConfigFromJSON(b, drive.DriveFileScope)
-
+	config, err := google.ConfigFromJSON(b, drive.DriveScope)
 	if err != nil {
-		return nil, err
+		log.Fatalf("Unable to parse client secret file to config: %v", err)
 	}
-
 	client := getClient(config)
 
-	service, err := drive.New(client)
-
+	srv, err := drive.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
-		fmt.Printf("Cannot create the Google Drive service: %v\n", err)
-		return nil, err
+		log.Fatalf("Unable to retrieve Drive client: %v", err)
 	}
 
-	return service, err
+	return srv, err
 }
 
-func createDir(service *drive.Service, name string, parentId string) (*drive.File, error) {
-	d := &drive.File{
-		Name:     name,
-		MimeType: "application/vnd.google-apps.folder",
-		Parents:  []string{parentId},
-	}
-
-	file, err := service.Files.Create(d).Do()
+func getDir(service *drive.Service) (*drive.File, error) {
+	folder, err := service.Files.List().Q("name = 'Minecraft' and mimeType = 'application/vnd.google-apps.folder'").Do()
 
 	if err != nil {
-		log.Println("Could not create dir: " + err.Error())
+		log.Println(err.Error())
 		return nil, err
 	}
 
-	return file, nil
+	if len(folder.Files) != 1 {
+		return nil, nil
+	}
+
+	return folder.Files[0], nil
+
 }
 
 func createFile(service *drive.Service, name string, mimeType string, content io.Reader, parentId string) (*drive.File, error) {
@@ -138,15 +134,15 @@ func addFiles(w *zip.Writer, basePath, baseInZip string) {
 	// Open the Directory
 	files, err := ioutil.ReadDir(basePath)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 	}
 
 	for _, file := range files {
-		fmt.Println(basePath + file.Name())
+		log.Println(basePath + file.Name())
 		if !file.IsDir() {
 			dat, err := ioutil.ReadFile(basePath + file.Name())
 			if err != nil {
-				fmt.Println(err)
+				log.Println(err)
 			}
 
 			// Add some files to the archive.
@@ -170,8 +166,59 @@ func addFiles(w *zip.Writer, basePath, baseInZip string) {
 	}
 }
 
+func unzip() {
+	dst := "Minecraft"
+	archive, err := zip.OpenReader("server.zip")
+	if err != nil {
+		panic(err)
+	}
+	defer archive.Close()
+
+	for _, f := range archive.File {
+		filePath := filepath.Join(dst, f.Name)
+		fmt.Println("unzipping file ", filePath)
+
+		if !strings.HasPrefix(filePath, filepath.Clean(dst)+string(os.PathSeparator)) {
+			fmt.Println("invalid file path")
+			return
+		}
+		if f.FileInfo().IsDir() {
+			fmt.Println("creating directory...")
+			os.MkdirAll(filePath, os.ModePerm)
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(filePath), os.ModePerm); err != nil {
+			panic(err)
+		}
+
+		dstFile, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+		if err != nil {
+			panic(err)
+		}
+
+		fileInArchive, err := f.Open()
+		if err != nil {
+			panic(err)
+		}
+
+		if _, err := io.Copy(dstFile, fileInArchive); err != nil {
+			panic(err)
+		}
+
+		dstFile.Close()
+		fileInArchive.Close()
+	}
+}
+
 func fetch(service *drive.Service) {
-	r, err := service.Files.List().Q("'-Minecraft-' in parents").OrderBy("createdTime desc").Do()
+	d, err := getDir(service)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	r, err := service.Files.List().Q("parents in " + "'" + d.Id + "'").OrderBy("createdTime desc").Do()
 	if err != nil {
 		log.Fatalf("Unable to retrieve files: %v", err)
 	}
@@ -179,11 +226,10 @@ func fetch(service *drive.Service) {
 	if len(r.Files) == 0 {
 		fmt.Println("No files found.")
 	} else {
-		for _, i := range r.Files {
-			fmt.Printf("%v (%vs )\n", i.Name, i.Id)
-		}
 
 		f_id := r.Files[0].Id
+
+		fmt.Println(r.Files[0].Name)
 
 		response, err := service.Files.Get(f_id).Download()
 
@@ -191,71 +237,75 @@ func fetch(service *drive.Service) {
 			fmt.Println(err)
 		}
 
-		z, errZ := zlib.NewReader(response.Body)
+		bodybytes, err := io.ReadAll(response.Body)
 
-		if errZ != nil {
-			fmt.Println(errZ)
+		fmt.Print(len(bodybytes))
+
+		if err != nil {
+			log.Fatal(err)
 		}
 
-		response.Body.Close()
+		ioutil.WriteFile("server.zip", bodybytes, 0777)
 
-		p, errA := ioutil.ReadAll(z)
+		unzip()
 
-		if errA != nil {
-			fmt.Println(errA)
-		}
-
-		errF := os.WriteFile("server.zip", p, 0644)
-
-		if errF != nil {
-			fmt.Println(errF)
+		for j, i := range r.Files {
+			fmt.Printf("%v (%vs )\n", i.Name, i.Id)
+			if j != 0 {
+				service.Files.Delete(i.Id).Do()
+			}
 		}
 
 	}
 
 }
 
-func main() {
+func spawn_processes() {
+	fmt.Println("START ngrok")
+	ngrokCmd := exec.Command("cmd.exe", "/C", "cd", "Minecraft/Minecraft/", "&&", "ngrok.exe", "tcp", "25565", "-log=stdout")
 
-	err := godotenv.Load(".env")
+	ngrokCmd.Stdout = os.Stdout
+	ngrokCmd.Stderr = os.Stderr
 
-	if err != nil {
-		log.Fatal("Error loading .env file")
-	}
+	err := ngrokCmd.Start()
 
-	SERVER_PATH := os.Getenv("SERVER_PATH")
-
-	// Step 1. Get the Google Drive service
-	service, err := getService()
-
-	// Fetch last version
-	fetch(service)
-
-	//RUN MINECRAFT && ngrok
-
-	ngrokCmd := exec.Command("ngrok", "tcp", "25565", "-log=stdout")
-	ngrokCmd.Start()
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	err = ngrokCmd.Wait()
-
-	log.Printf("Ngrok finished with error: %v", err)
-
-	mcCmd := exec.Command("java", "-Xmx1024M", "-Xms1024M", "-jar", "server.jar", "nogui")
-	mcCmd.Start()
+	fmt.Println("END ngrok")
+	serverCmd := exec.Command("cmd.exe", "/C", "cd", "Minecraft/Minecraft/", "&&", "java", "-Xmx1024M", "-Xms1024M", "-jar", "server.jar", "nogui")
+	stdin, err := serverCmd.StdinPipe()
 	if err != nil {
-		log.Fatal(err)
+		fmt.Println(err) //replace with logger, or anything you want
 	}
 
-	err = mcCmd.Wait()
+	serverCmd.Stdout = os.Stdout
+	serverCmd.Stderr = os.Stderr
 
-	log.Printf("Minecraft finished with error: %v", err)
+	fmt.Println("START")
+	if err = serverCmd.Start(); err != nil {
+		fmt.Println("An error occured: ", err)
+	}
 
-	//------------------------
+	fmt.Scanln()
+	fmt.Println("\nCLOSING THE SERVER...")
+	fmt.Println()
+	fmt.Println()
+	io.WriteString(stdin, "/stop\n")
+	serverCmd.Wait()
+	ngrokCmd.Process.Kill()
+	ngrokCmd.Process.Release()
+	killcmd := exec.Command("cmd.exe", "/c", "taskkill", "/im", "ngrok.exe", "/t", "/f").Run()
+	if killcmd != nil {
+		fmt.Println("An error occured: ", killcmd)
+	}
+	fmt.Println()
+	fmt.Println()
+	fmt.Println("END")
+}
 
-	baseFolder := SERVER_PATH
+func upload(path string, service *drive.Service) string {
+	baseFolder := path
 
 	id := uuid.New().String()
 
@@ -282,29 +332,63 @@ func main() {
 		fmt.Println(err)
 	}
 
-	// Step 1. Open the file
 	f, err := os.Open("mc-" + id + ".zip")
 
 	if err != nil {
-		panic(fmt.Sprintf("cannot open file: %v", err))
+		log.Fatal(fmt.Sprintf("cannot open file: %v", err))
 	}
 
 	defer f.Close()
 
-	// Step 3. Create the directory
-	dir, err := createDir(service, "-Minecraft-", "root")
+	dir, err := getDir(service)
 
 	if err != nil {
-		panic(fmt.Sprintf("Could not create dir: %v\n", err))
+		log.Fatal(fmt.Sprintf("Could not create dir: %v\n", err))
 	}
 
-	// Step 4. Create the file and upload its content
 	file, err := createFile(service, "mc-"+id+".zip", "application/zip", f, dir.Id)
 
 	if err != nil {
-		panic(fmt.Sprintf("Could not create file: %v\n", err))
+		log.Fatal(fmt.Sprintf("Could not create file: %v\n", err))
 	}
 
 	fmt.Printf("File '%s' successfully uploaded in '%s' directory", file.Name, dir.Name)
+
+	return id
+}
+
+func remove_temp(id string) {
+	err := os.RemoveAll("Minecraft/")
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	err = os.Remove("server.zip")
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	err = os.Remove("mc-" + id + ".zip")
+	if err != nil {
+		fmt.Println(err)
+	}
+}
+
+func main() {
+
+	service, err := getService()
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Fetch last version
+	fetch(service)
+
+	//RUN MINECRAFT && ngrok
+	spawn_processes()
+	//------------------------
+	id := upload("Minecraft/", service)
+	remove_temp(id)
 
 }
