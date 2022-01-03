@@ -11,8 +11,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 
 	"github.com/google/uuid"
 	"golang.org/x/oauth2"
@@ -166,100 +164,6 @@ func addFiles(w *zip.Writer, basePath, baseInZip string) {
 	}
 }
 
-func unzip() {
-	dst := "Minecraft"
-	archive, err := zip.OpenReader("server.zip")
-	if err != nil {
-		panic(err)
-	}
-	defer archive.Close()
-
-	for _, f := range archive.File {
-		filePath := filepath.Join(dst, f.Name)
-		fmt.Println("unzipping file ", filePath)
-
-		if !strings.HasPrefix(filePath, filepath.Clean(dst)+string(os.PathSeparator)) {
-			fmt.Println("invalid file path")
-			return
-		}
-		if f.FileInfo().IsDir() {
-			fmt.Println("creating directory...")
-			os.MkdirAll(filePath, os.ModePerm)
-			continue
-		}
-
-		if err := os.MkdirAll(filepath.Dir(filePath), os.ModePerm); err != nil {
-			panic(err)
-		}
-
-		dstFile, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
-		if err != nil {
-			panic(err)
-		}
-
-		fileInArchive, err := f.Open()
-		if err != nil {
-			panic(err)
-		}
-
-		if _, err := io.Copy(dstFile, fileInArchive); err != nil {
-			panic(err)
-		}
-
-		dstFile.Close()
-		fileInArchive.Close()
-	}
-}
-
-func fetch(service *drive.Service) {
-	d, err := getDir(service)
-
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	r, err := service.Files.List().Q("parents in " + "'" + d.Id + "'").OrderBy("createdTime desc").Do()
-	if err != nil {
-		log.Fatalf("Unable to retrieve files: %v", err)
-	}
-	fmt.Println("Files:")
-	if len(r.Files) == 0 {
-		fmt.Println("No files found.")
-	} else {
-
-		f_id := r.Files[0].Id
-
-		fmt.Println(r.Files[0].Name)
-
-		response, err := service.Files.Get(f_id).Download()
-
-		if err != nil {
-			fmt.Println(err)
-		}
-
-		bodybytes, err := io.ReadAll(response.Body)
-
-		fmt.Print(len(bodybytes))
-
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		ioutil.WriteFile("server.zip", bodybytes, 0777)
-
-		unzip()
-
-		for j, i := range r.Files {
-			fmt.Printf("%v (%vs )\n", i.Name, i.Id)
-			if j != 0 {
-				service.Files.Delete(i.Id).Do()
-			}
-		}
-
-	}
-
-}
-
 func spawn_processes() {
 	fmt.Println("START ngrok")
 	ngrokCmd := exec.Command("powershell", "-nologo", "-noprofile", ".\\ngrok.exe", "tcp", "25565", "-log=stdout")
@@ -385,9 +289,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	// Fetch last version
-	fetch(service)
 
 	//RUN MINECRAFT && ngrok
 	spawn_processes()
