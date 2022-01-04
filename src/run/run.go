@@ -166,7 +166,7 @@ func addFiles(w *zip.Writer, basePath, baseInZip string) {
 
 func spawn_processes() {
 	fmt.Println("START ngrok")
-	ngrokCmd := exec.Command("powershell", "-nologo", "-noprofile", ".\\ngrok.exe", "tcp", "25565", "-log=stdout")
+	ngrokCmd := exec.Command("powershell", "-nologo", "-noprofile", "./ngrok.exe", "tcp", "25565", "-log=stdout")
 
 	ngrokCmd.Stdout = os.Stdout
 	ngrokCmd.Stderr = os.Stderr
@@ -177,11 +177,13 @@ func spawn_processes() {
 		log.Fatal(err)
 	}
 	fmt.Println("END ngrok")
+	fmt.Println("ngrok stared with success..")
+	fmt.Scanln()
 	var usage int
-	fmt.Println("Insert RAM you want: \n1 (default)\n2\n3\n4")
+	fmt.Println("Insert RAM you want: \n1\n2\n3\n4")
 	fmt.Scanln(&usage)
 	var ram int = usage * 1024
-	serverCmd := exec.Command("powershell", "-nologo", "-noprofile", "cd", "Minecraft/Minecraft/", "&&", "java", "-Xmx"+fmt.Sprint(ram)+"M", "-Xms"+fmt.Sprint(ram)+"M", "-jar", "server.jar", "nogui")
+	serverCmd := exec.Command("cmd", "/C", "cd", "Minecraft/Minecraft/", "&&", "java", "-Xmx"+fmt.Sprint(ram)+"M", "-Xms"+fmt.Sprint(ram)+"M", "-jar", "server.jar", "nogui")
 	stdin, err := serverCmd.StdinPipe()
 	if err != nil {
 		fmt.Println(err) //replace with logger, or anything you want
@@ -260,7 +262,7 @@ func upload(path string, service *drive.Service) string {
 		log.Fatal(fmt.Sprintf("Could not create file: %v\n", err))
 	}
 
-	fmt.Printf("File '%s' successfully uploaded in '%s' directory", file.Name, dir.Name)
+	fmt.Printf("File '%s' successfully uploaded into '%s' directory", file.Name, dir.Name)
 
 	return id
 }
